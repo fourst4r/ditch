@@ -1,0 +1,16 @@
+Microsoft Visual Studio Solution File, Format Version 11.00
+# Visual Studio 2010
+Project("{381D3743-C67A-45F2-9761-972FBFF70027}") = "ditch", ".dub/ditch.visualdproj", "{361E525C-AD11-456B-92AA-70430BD8C2CE}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		debug|x64 = debug|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{361E525C-AD11-456B-92AA-70430BD8C2CE}.debug|x64.ActiveCfg = debug|x64
+		{361E525C-AD11-456B-92AA-70430BD8C2CE}.debug|x64.Build.0 = debug|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

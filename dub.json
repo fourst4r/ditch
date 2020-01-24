@@ -1,0 +1,9 @@
+{
+	"authors": [
+		"oxyge"
+	],
+	"copyright": "Copyright © 2020, oxyge",
+	"description": "A minimal D application.",
+	"license": "proprietary",
+	"name": "ditch"
+}
