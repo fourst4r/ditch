@@ -1,9 +1,6 @@
 module ditch;
 
-import std.string : empty, format, startsWith, chomp;
 import std.conv : to;
-import std.utf : toUTF32;
-
 import std.socket;
 import std.string;
 import std.algorithm.mutation : remove;
@@ -11,8 +8,11 @@ import std.range;
 import std.algorithm.searching : canFind, any;
 import std.stdio;
 
+alias ReplyFn = void delegate(string);
+
 class RawMessage
 {
+	// should these be protected? 🤔
 	const string[string] tags;
 	const string nick;
 	const string user;
@@ -148,85 +148,6 @@ class Ping : RawMessage
 	}
 }
 
-/+
-IRC RFC1459 BNF grammar
-
-<message>  ::= [':' <prefix> <SPACE> ] <command> <params> <crlf>
-<prefix>   ::= <servername> | <nick> [ '!' <user> ] [ '@' <host> ]
-<command>  ::= <letter> { <letter> } | <number> <number> <number>
-<SPACE>    ::= ' ' { ' ' }
-<params>   ::= <SPACE> [ ':' <trailing> | <middle> <params> ]
-
-<middle>   ::= <Any *non-empty* sequence of octets not including SPACE or NUL or CR or LF, the first of which may not be ':'>
-<trailing> ::= <Any, possibly *empty*, sequence of octets not including NUL or CR or LF>
-
-<crlf>     ::= CR LF
-
-and the extended IRCv3 message tags
-
-<message>       ::= ['@' <tags> <SPACE>] [':' <prefix> <SPACE> ] <command> <params> <crlf>
-<tags>          ::= <tag> [';' <tag>]*
-<tag>           ::= <key> ['=' <escaped_value>]
-<key>           ::= [ <client_prefix> ] [ <vendor> '/' ] <key_name>
-<client_prefix> ::= '+'
-<key_name>      ::= <non-empty sequence of ascii letters, digits, hyphens ('-')>
-<escaped_value> ::= <sequence of zero or more utf8 characters except NUL, CR, LF, semicolon (`;`) and SPACE>
-<vendor>        ::= <host>
-
-+/
-
-enum Command
-{
-	CAP,
-	JOIN, // Join a channel.
-	PART, // Depart from a channel.
-	PRIVMSG, // Send a message to a channel.
-	CLEARCHAT, // Purge a user’s message(s), typically after a user is banned from chat or timed out.
-	CLEARMSG, // Single message removal on a channel. This is triggered via /delete <target-msg-id> on IRC.
-	GLOBALUSERSTATE, // On successful login, provides data about the current logged-in user through IRC tags.
-	HOSTTARGET, // Channel starts or stops host mode.
-	NAMES_START = 353,
-	NAMES_END = 366,
-	NICK,
-	NOTICE, // General notices from the server.
-	PING, // Used to test the presence of an active client at the other end of the connection.
-	PONG, // A reply to ping message.
-	RECONNECT, // Rejoin channels after a restart.
-	ROOMSTATE, // Identifies the channel’s chat settings (e.g., slow mode duration).
-	USERNOTICE, // Announces Twitch-specific events to the channel (e.g., a user’s subscription notification).
-	USERSTATE, // Identifies a user’s chat settings or properties (e.g., chat color).
-	WHISPER,
-
-	INVALID = 421,
-	UNKNOWN,
-}
-
-Command commandFromID(string id) nothrow pure
-{
-	switch (id) with (Command)
-	{
-		case "CAP": return CAP;
-		case "JOIN": return JOIN;
-		case "PART": return PART;
-		case "PRIVMSG": return PRIVMSG;
-		case "CLEARCHAT": return CLEARCHAT;
-		case "CLEARMSG": return CLEARMSG;
-		case "HOSTTARGET": return HOSTTARGET;
-		case "353": return NAMES_START;
-		case "366": return NAMES_END;
-		case "NOTICE": return NOTICE;
-		case "RECONNECT": return RECONNECT;
-		case "ROOMSTATE": return ROOMSTATE;
-		case "USERNOTICE": return USERNOTICE;
-		case "USERSTATE": return USERSTATE;
-		case "WHISPER": return WHISPER;
-
-		case "421": return INVALID;
-		default:
-			return UNKNOWN;
-	}
-}
-
 /// Purge a user’s message(s), typically after a user is banned from chat or timed out.
 class ClearChat : RawMessage
 {
@@ -335,8 +256,6 @@ class UserState : RawMessage
 	}
 }
 
-
-
 /// Identifies the channel’s chat settings (e.g., slow mode duration).
 class RoomState : RawMessage
 {
@@ -357,18 +276,19 @@ class RoomState : RawMessage
 
 class Channel
 {
-	string name;
-	string hosting;
+	@property string name()
+	{
+		return _name;
+	}
 
 	@property string[] users()
 	{
 		return _users;
 	}
-	private string[] _users;
 
 	this(const string name)
 	{
-		this.name = name;
+		_name = name;
 	}
 
 	void addUser(const string user)
@@ -378,9 +298,12 @@ class Channel
 
 	void removeUser(const string user)
 	{
-		//if (!_users.any!(u => u == user)) return;
 		_users = _users.remove!(u => u == user);
 	}
+
+private:
+	string _name;
+	string[] _users;
 }
 
 class TMIClient
@@ -416,54 +339,73 @@ class TMIClient
 		close();
 	}
 
-	Channel getChannel(string channel)
-	{
-		return _channels[channel];
-	}
+	//Channel getChannel(string channel)
+	//{
+	//    return _channels[channel];
+	//}
 
 	void connect()
 	{
 		import std.stdio;
 		import std.array;
+		import core.thread : Thread;
+		import core.time : dur;
 
-		auto address = getAddress(IRC_ADDRESS, IRC_PORT)[0];
-		_socket.connect(address);
-		_connected = true;
-
-		send("CAP REQ :twitch.tv/tags twitch.tv/commands twitch.tv/membership");
-		send("PASS %s".format(_oauth));
-		send("NICK %s".format(_nick));
-
-		rejoin();
-		
-		ubyte[2048] buffer = new ubyte[2048];
-		string received = "";
-		ptrdiff_t amountRead;
-		while ((amountRead = _socket.receive(buffer)) > 0)
+		_reconnectTime = 0;
+		while (true)
 		{
-			received ~= cast(string) buffer[0..amountRead];
-			ptrdiff_t pos;
-			while ((pos = received.indexOf(IRC_DELIMITER)) != -1)
+			if (_reconnectTime > 0)
 			{
-				string packet = received[0..pos];
-				received = received[pos + IRC_DELIMITER.length..$];
+				writefln("reconnecting in %ds", _reconnectTime);
+				Thread.sleep(dur!"seconds"(_reconnectTime));
+			}
 
-				debug(LogPackets) writeln("<- " ~ packet);
-				RawMessage msg = parseMessage(packet);
-				handleMessage(msg);
+			try
+			{
+				auto address = getAddress(IRC_ADDRESS, IRC_PORT)[0];
+				_socket.connect(address);
+			}
+			catch (SocketOSException e)
+			{
+				writefln("failed to connect: %s", e.msg);
+				_reconnectTime = _reconnectTime == 0 ? 1 : _reconnectTime << 1;
+				continue;
+			}
+			_connected = true;
+			_reconnectTime = 0;
+
+			send("CAP REQ :twitch.tv/tags twitch.tv/commands twitch.tv/membership");
+			send("PASS %s".format(_oauth));
+			send("NICK %s".format(_nick));
+
+			rejoin();
+
+			ubyte[2048] buffer = new ubyte[2048];
+			string received = "";
+			ptrdiff_t amountRead;
+			while ((amountRead = _socket.receive(buffer)) > 0)
+			{
+				received ~= cast(string) buffer[0..amountRead];
+				ptrdiff_t pos;
+				while ((pos = received.indexOf(IRC_DELIMITER)) != -1)
+				{
+					string packet = received[0..pos];
+					received = received[pos + IRC_DELIMITER.length..$];
+
+					debug(LogPackets) writeln("<- " ~ packet);
+					RawMessage msg = parseMessage(packet);
+					handleMessage(msg);
+				}
+			}
+
+			_connected = false;
+			if (amountRead == 0 || amountRead == Socket.ERROR)
+			{
+				writefln("socket disconnected: %s", _socket.getErrorText());
+				_reconnectTime = _reconnectTime == 0 ? 1 : _reconnectTime << 1;
+				continue;
 			}
 		}
-
-		_connected = false;
-		if (amountRead == 0)
-		{
-
-		}
-		else if (amountRead == Socket.ERROR)
-		{
-
-		}
-		writeln("SOCKET ERROR: " ~ _socket.getErrorText());
 	}
 
 	void close() nothrow @safe
@@ -490,9 +432,15 @@ class TMIClient
 		send("PRIVMSG #%s :%s".format(channel.toLower, message));
 	}
 
-	void sendWhisper(const string user, const string message)
+	void whisper(const string user, const string message)
+	in (!_channels.keys.empty, "join a channel to whisper")
 	{
-		send("WHISPER %s :%s".format(user.toLower, message));
+		sendMessage(_channels.keys[0], "/w %s %s".format(user, message));
+	}
+
+	void reply(const string message)
+	{
+
 	}
 
 private:
@@ -503,6 +451,7 @@ private:
 
 	TcpSocket _socket;
 	bool _connected;
+	long _reconnectTime;
 	string _nick, _oauth;
 	Channel[string] _channels;
 
@@ -527,7 +476,7 @@ private:
 	{
 		if (s.empty) return null;
 		string[] parts = s.split(' ');	
-		
+
 		// optional @tags
 		string[string] tags;
 		if (parts[0].startsWith('@'))
@@ -586,7 +535,7 @@ private:
 				tags[key] = value;
 			}
 		}
-		
+
 		return tags;
 	}
 
@@ -740,7 +689,7 @@ private:
 					onPing(new Ping(raw));
 				break;
 			case "PRIVMSG":
-				if (onPrivMsg != null) 
+				if (onPrivMsg != null)
 					onPrivMsg(new PrivMsg(raw));
 				break;
 			case "USERSTATE":
