@@ -24,4 +24,4 @@ docs/
 *.lst
 
 # Visual Studio
-.vs/ditch/v16/.suo
+.vs/
