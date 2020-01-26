@@ -1,4 +1,4 @@
-module ditch;
+module ditch.tmi;
 
 import std.conv : to;
 import std.socket;
@@ -141,7 +141,6 @@ class Notice : RawMessage
 
 class Ping : RawMessage
 {
-
 	this(RawMessage raw)
 	{
 		super(raw);
@@ -306,8 +305,13 @@ private:
 	string[] _users;
 }
 
+
 class TMIClient
 {
+	import std.experimental.logger;
+	import std.experimental.logger.filelogger;
+	import std.stdio : stdout;
+
 	void delegate(PrivMsg) onPrivMsg;
 	void delegate(Whisper) onWhisper;
 	void delegate(HostTarget) onHostTarget;
@@ -327,12 +331,20 @@ class TMIClient
 	//    return _channels.values;
 	//}
 
-	this(string nick, string oauth)
+	this(string nick, string oauth, Logger logger)
 	{
+		
 		_nick = nick.toLower();
 		_oauth = oauth;
 		_socket = new TcpSocket;
+		_logger = logger;
 	}
+	
+	//this(string nick, string oauth)
+	//{
+	//    this(nick, oauth);
+	//    _logger = logger;
+	//}
 
 	~this() nothrow
 	{
@@ -356,7 +368,7 @@ class TMIClient
 		{
 			if (_reconnectTime > 0)
 			{
-				writefln("reconnecting in %ds", _reconnectTime);
+				_logger.warningf("reconnecting in %ds", _reconnectTime);
 				Thread.sleep(dur!"seconds"(_reconnectTime));
 			}
 
@@ -367,7 +379,7 @@ class TMIClient
 			}
 			catch (SocketOSException e)
 			{
-				writefln("failed to connect: %s", e.msg);
+				_logger.warningf("failed to connect: %s", e.msg);
 				_reconnectTime = _reconnectTime == 0 ? 1 : _reconnectTime << 1;
 				continue;
 			}
@@ -392,7 +404,7 @@ class TMIClient
 					string packet = received[0..pos];
 					received = received[pos + IRC_DELIMITER.length..$];
 
-					debug(LogPackets) writeln("<- " ~ packet);
+					_logger.infof("<- %s", packet);
 					RawMessage msg = parseMessage(packet);
 					handleMessage(msg);
 				}
@@ -401,7 +413,7 @@ class TMIClient
 			_connected = false;
 			if (amountRead == 0 || amountRead == Socket.ERROR)
 			{
-				writefln("socket disconnected: %s", _socket.getErrorText());
+				_logger.warningf("socket disconnected: %s", _socket.getErrorText());
 				_reconnectTime = _reconnectTime == 0 ? 1 : _reconnectTime << 1;
 				continue;
 			}
@@ -432,16 +444,34 @@ class TMIClient
 		send("PRIVMSG #%s :%s".format(channel.toLower, message));
 	}
 
+	// some convenience methods
 	void whisper(const string user, const string message)
-	in (!_channels.keys.empty, "join a channel to whisper")
 	{
-		sendMessage(_channels.keys[0], "/w %s %s".format(user, message));
+		sendMessage(_nick, "/w %s %s".format(user, message));
 	}
 
-	void reply(const string message)
+	import core.time : Duration;
+	void timeout(const string channel, const string user, const Duration dur)
 	{
-
+		sendMessage(channel, "/timeout %s %d".format(user, dur.total!"seconds"));
 	}
+
+	void untimeout(const string channel, const string user)
+	{
+		sendMessage(channel, "/untimeout %s".format(user));
+	}
+
+	void mod(const string channel, const string user)
+	{
+		sendMessage(channel, "/mod %s".format(user));
+	}
+
+	void unmod(const string channel, const string user)
+	{
+		sendMessage(channel, "/unmod %s".format(user));
+	}
+
+
 
 private:
 	enum string IRC_DELIMITER = "\r\n";
@@ -454,6 +484,7 @@ private:
 	long _reconnectTime;
 	string _nick, _oauth;
 	Channel[string] _channels;
+	Logger _logger;
 
 	void rejoin()
 	{
@@ -467,9 +498,8 @@ private:
 	void send(const string s)
 	{
 		if (!_connected) return;
-		string message = s ~ IRC_DELIMITER;
-		debug(LogPackets) write("-> " ~ message);
-		_socket.send(message);
+		_logger.infof("-> %s", s);
+		_socket.send(s ~ IRC_DELIMITER);
 	}
 
 	static RawMessage parseMessage(const string s)
@@ -676,6 +706,10 @@ private:
 			case "NAMES":
 				if (onNames != null)
 					onNames(new Names(raw));
+				break;
+			case "NOTICE":
+				if (onNotice)
+					onNotice(new Notice(raw));
 				break;
 			case "PART":
 				//auto part = new Part(raw);
