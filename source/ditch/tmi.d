@@ -8,7 +8,12 @@ import std.range;
 import std.algorithm.searching : canFind, any;
 import std.stdio;
 
-alias ReplyFn = void delegate(string);
+class Connect {}
+
+class Disconnect
+{
+	Exception e;
+}
 
 class RawMessage
 {
@@ -311,6 +316,8 @@ class TMIClient
 	import std.experimental.logger;
 	import std.experimental.logger.filelogger;
 	import std.stdio : stdout;
+	import std.concurrency : Tid, spawn, concurrencySend = send;
+	//import concurrencySend = std.concurrency : send;
 
 	void delegate(PrivMsg) onPrivMsg;
 	void delegate(Whisper) onWhisper;
@@ -336,7 +343,6 @@ class TMIClient
 		
 		_nick = nick.toLower();
 		_oauth = oauth;
-		_socket = new TcpSocket;
 		_logger = logger;
 	}
 	
@@ -346,7 +352,7 @@ class TMIClient
 	//    _logger = logger;
 	//}
 
-	~this() nothrow
+	~this()
 	{
 		close();
 	}
@@ -356,11 +362,35 @@ class TMIClient
 	//    return _channels[channel];
 	//}
 
+	struct CancelMsg {};
+	struct CancelMsgAck {};
+	static void writeLoop(Tid tid, shared TcpSocket socket)
+	{
+		bool canceled = false;
+		while (!canceled)
+		{
+			import std.concurrency : receive;
+			receive(
+				(string msg)
+				{
+					(cast(TcpSocket) socket).send(msg);
+				},
+				(CancelMsg a)
+				{ 
+					concurrencySend(tid, CancelMsgAck());
+					canceled = true;
+				}
+			);
+
+			//(cast(TcpSocket) socket).send(receiveOnly!string);
+		}
+		writeln("write loop done!!!!!!!!!!!!!!!!!");
+	}
+
 	void connect()
 	{
 		import std.stdio;
 		import std.array;
-		import core.thread : Thread;
 		import core.time : dur;
 
 		_reconnectTime = 0;
@@ -369,18 +399,39 @@ class TMIClient
 			if (_reconnectTime > 0)
 			{
 				_logger.warningf("reconnecting in %ds", _reconnectTime);
+
+				import core.thread : Thread;
 				Thread.sleep(dur!"seconds"(_reconnectTime));
 			}
 
 			try
 			{
-				auto address = getAddress(IRC_ADDRESS, IRC_PORT)[0];
+				_socket = new TcpSocket;
+
+				Address[] addresses = getAddress(IRC_ADDRESS, IRC_PORT);
+				writefln("  %d addresses found.", addresses.length);
+				foreach (size_t i, Address a; addresses)
+				{
+					writefln("  Address %d:", i+1);
+					writefln("    IP address: %s", a.toAddrString());
+					writefln("    Hostname: %s", a.toHostNameString());
+					writefln("    Port: %s", a.toPortString());
+					writefln("    Service name: %s", a.toServiceNameString());
+				}
+				//    
+				//foreach (a; addresses)
+				//    writefln("%s %s %s", a.addressFamily, a.toServiceNameString(), a.toAddrString(), a.name);
+				auto address = addresses[0];
 				_socket.connect(address);
+
+				import std.concurrency : spawn, thisTid;
+				writeTid = spawn(&writeLoop, thisTid, cast(shared) _socket);
 			}
 			catch (SocketOSException e)
 			{
 				_logger.warningf("failed to connect: %s", e.msg);
 				_reconnectTime = _reconnectTime == 0 ? 1 : _reconnectTime << 1;
+				close();
 				continue;
 			}
 			_connected = true;
@@ -410,19 +461,26 @@ class TMIClient
 				}
 			}
 
-			_connected = false;
 			if (amountRead == 0 || amountRead == Socket.ERROR)
 			{
 				_logger.warningf("socket disconnected: %s", _socket.getErrorText());
 				_reconnectTime = _reconnectTime == 0 ? 1 : _reconnectTime << 1;
+				close();
 				continue;
 			}
 		}
 	}
 
-	void close() nothrow @safe
+	void close()
 	{
+		import std.concurrency : receiveOnly;
+
 		_connected = false;
+
+		concurrencySend(writeTid, CancelMsg());
+		receiveOnly!CancelMsgAck;
+		
+		_socket.shutdown(SocketShutdown.BOTH);
 		_socket.close();
 	}
 
@@ -485,6 +543,7 @@ private:
 	string _nick, _oauth;
 	Channel[string] _channels;
 	Logger _logger;
+	Tid writeTid;
 
 	void rejoin()
 	{
@@ -499,7 +558,8 @@ private:
 	{
 		if (!_connected) return;
 		_logger.infof("-> %s", s);
-		_socket.send(s ~ IRC_DELIMITER);
+		//_socket.send(s ~ IRC_DELIMITER);
+		concurrencySend(writeTid, s ~ IRC_DELIMITER);
 	}
 
 	static RawMessage parseMessage(const string s)
@@ -702,6 +762,8 @@ private:
 				//_channels[join.channel].addUser(join.nick);
 				if (onJoin != null)
 					onJoin(new Join(raw));
+				//alias s = std.concurrency.send;
+				//s(new Names(raw));
 				break;
 			case "NAMES":
 				if (onNames != null)
