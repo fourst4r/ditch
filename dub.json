@@ -3,6 +3,9 @@
 		"oxyge"
 	],
 	"copyright": "Copyright © 2020, oxyge",
+	"dependencies": {
+		"vibe-d": "~>0.8.2"
+	},
 	"description": "A minimal D application.",
 	"license": "proprietary",
 	"name": "ditch"

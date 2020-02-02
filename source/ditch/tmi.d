@@ -313,11 +313,10 @@ private:
 
 class TMIClient
 {
-	import std.experimental.logger;
-	import std.experimental.logger.filelogger;
 	import std.stdio : stdout;
-	import std.concurrency : Tid, spawn, concurrencySend = send;
-	//import concurrencySend = std.concurrency : send;
+	import core.time : Duration;
+	import vibe.core.net : TCPConnection, connectTCP;
+	import vibe.core.log;
 
 	void delegate(PrivMsg) onPrivMsg;
 	void delegate(Whisper) onWhisper;
@@ -333,58 +332,20 @@ class TMIClient
 	void delegate(Ping) onPing;
 	void delegate(Notice) onNotice;
 
-	//@property Channel[] channels()
-	//{
-	//    return _channels.values;
-	//}
-
-	this(string nick, string oauth, Logger logger)
+	@property const(string[]) channels()
 	{
-		
+		return cast(const)_channels;
+	}
+
+	this(string nick, string oauth)
+	{
 		_nick = nick.toLower();
 		_oauth = oauth;
-		_logger = logger;
 	}
-	
-	//this(string nick, string oauth)
-	//{
-	//    this(nick, oauth);
-	//    _logger = logger;
-	//}
 
 	~this()
 	{
 		close();
-	}
-
-	//Channel getChannel(string channel)
-	//{
-	//    return _channels[channel];
-	//}
-
-	struct CancelMsg {};
-	struct CancelMsgAck {};
-	static void writeLoop(Tid tid, shared TcpSocket socket)
-	{
-		bool canceled = false;
-		while (!canceled)
-		{
-			import std.concurrency : receive;
-			receive(
-				(string msg)
-				{
-					(cast(TcpSocket) socket).send(msg);
-				},
-				(CancelMsg a)
-				{ 
-					concurrencySend(tid, CancelMsgAck());
-					canceled = true;
-				}
-			);
-
-			//(cast(TcpSocket) socket).send(receiveOnly!string);
-		}
-		writeln("write loop done!!!!!!!!!!!!!!!!!");
 	}
 
 	void connect()
@@ -392,109 +353,66 @@ class TMIClient
 		import std.stdio;
 		import std.array;
 		import core.time : dur;
+	
+		import vibe.stream.operations : readLine;
+		import vibe.core.log : logError;
+		import vibe.core.core : Task, runTask;
+		import vibe.core.concurrency;
 
-		_reconnectTime = 0;
+		uint reconnectTime = 0;
 		while (true)
 		{
-			if (_reconnectTime > 0)
-			{
-				_logger.warningf("reconnecting in %ds", _reconnectTime);
-
-				import core.thread : Thread;
-				Thread.sleep(dur!"seconds"(_reconnectTime));
-			}
-
 			try
 			{
-				_socket = new TcpSocket;
+				_conn = connectTCP(IRC_ADDRESS, IRC_PORT);
+				scope(exit) _conn.close();
 
-				Address[] addresses = getAddress(IRC_ADDRESS, IRC_PORT);
-				writefln("  %d addresses found.", addresses.length);
-				foreach (size_t i, Address a; addresses)
+				initialize();
+				reconnectTime = 0;
+
+				while (_conn.connected)
 				{
-					writefln("  Address %d:", i+1);
-					writefln("    IP address: %s", a.toAddrString());
-					writefln("    Hostname: %s", a.toHostNameString());
-					writefln("    Port: %s", a.toPortString());
-					writefln("    Service name: %s", a.toServiceNameString());
-				}
-				//    
-				//foreach (a; addresses)
-				//    writefln("%s %s %s", a.addressFamily, a.toServiceNameString(), a.toAddrString(), a.name);
-				auto address = addresses[0];
-				_socket.connect(address);
-
-				import std.concurrency : spawn, thisTid;
-				writeTid = spawn(&writeLoop, thisTid, cast(shared) _socket);
-			}
-			catch (SocketOSException e)
-			{
-				_logger.warningf("failed to connect: %s", e.msg);
-				_reconnectTime = _reconnectTime == 0 ? 1 : _reconnectTime << 1;
-				close();
-				continue;
-			}
-			_connected = true;
-			_reconnectTime = 0;
-
-			send("CAP REQ :twitch.tv/tags twitch.tv/commands twitch.tv/membership");
-			send("PASS %s".format(_oauth));
-			send("NICK %s".format(_nick));
-
-			rejoin();
-
-			ubyte[2048] buffer = new ubyte[2048];
-			string received = "";
-			ptrdiff_t amountRead;
-			while ((amountRead = _socket.receive(buffer)) > 0)
-			{
-				received ~= cast(string) buffer[0..amountRead];
-				ptrdiff_t pos;
-				while ((pos = received.indexOf(IRC_DELIMITER)) != -1)
-				{
-					string packet = received[0..pos];
-					received = received[pos + IRC_DELIMITER.length..$];
-
-					_logger.infof("<- %s", packet);
-					RawMessage msg = parseMessage(packet);
+					auto ln = cast(string) _conn.readLine();
+					logInfo("<- %s", ln);
+					RawMessage msg = parseMessage(ln);
 					handleMessage(msg);
-				}
+				}			
+			}
+			catch (Exception e)
+			{
+				logError("Failed to read from server: %s", e.msg);
 			}
 
-			if (amountRead == 0 || amountRead == Socket.ERROR)
-			{
-				_logger.warningf("socket disconnected: %s", _socket.getErrorText());
-				_reconnectTime = _reconnectTime == 0 ? 1 : _reconnectTime << 1;
-				close();
-				continue;
-			}
+			import core.thread : Thread;
+			Thread.sleep(dur!"seconds"(reconnectTime));
+			reconnectTime = (reconnectTime == 0) ? 1 : reconnectTime << 1;
 		}
 	}
 
 	void close()
 	{
-		import std.concurrency : receiveOnly;
-
-		_connected = false;
-
-		concurrencySend(writeTid, CancelMsg());
-		receiveOnly!CancelMsgAck;
-		
-		_socket.shutdown(SocketShutdown.BOTH);
-		_socket.close();
+		_conn.close();
 	}
 
-	void join(const string channel)
+	void join(string channel)
 	{
-		if (channel in _channels) return;
+		channel = channel.toLower;
 
-		_channels[channel] = new Channel(channel);
-		send("JOIN #%s".format(channel.toLower));
+		import std.algorithm.searching : canFind;
+		if (_channels.canFind(channel)) return;
+
+		_channels ~= channel;
+		send("JOIN #" ~ channel);
 	}
 
 	void depart(const string channel)
 	{
 		send("PART #%s".format(channel.toLower));
+	}
+
+	void say(string channel, string message)
+	{
+		sendf("PRIVMSG #%s :%s", channel.toLower, message);
 	}
 
 	void sendMessage(const string channel, const string message)
@@ -503,68 +421,106 @@ class TMIClient
 	}
 
 	// some convenience methods
-	void whisper(const string user, const string message)
+	void whisper(string user, string message)
 	{
-		sendMessage(_nick, "/w %s %s".format(user, message));
+		say(_nick, "/w %s %s".format(user, message));
 	}
 
-	import core.time : Duration;
 	void timeout(const string channel, const string user, const Duration dur)
 	{
-		sendMessage(channel, "/timeout %s %d".format(user, dur.total!"seconds"));
+		say(channel, "/timeout %s %d".format(user, dur.total!"seconds"));
 	}
 
 	void untimeout(const string channel, const string user)
 	{
-		sendMessage(channel, "/untimeout %s".format(user));
+		say(channel, "/untimeout %s".format(user));
 	}
 
 	void mod(const string channel, const string user)
 	{
-		sendMessage(channel, "/mod %s".format(user));
+		say(channel, "/mod %s".format(user));
 	}
 
 	void unmod(const string channel, const string user)
 	{
-		sendMessage(channel, "/unmod %s".format(user));
+		say(channel, "/unmod %s".format(user));
 	}
-
-
 
 private:
 	enum string IRC_DELIMITER = "\r\n";
 	enum string IRC_ADDRESS = "irc.chat.twitch.tv";
 	enum ushort IRC_PORT = 6667;
 	enum ushort IRC_PORT_TLS = 6697;
+	enum ushort IRC_MAX_LEN = 512;
 
-	TcpSocket _socket;
-	bool _connected;
-	long _reconnectTime;
 	string _nick, _oauth;
-	Channel[string] _channels;
-	Logger _logger;
-	Tid writeTid;
+	string[] _channels;
+	TCPConnection _conn;
 
-	void rejoin()
+	void initialize()
 	{
-		import std.algorithm.iteration : map;
+		send("CAP REQ :twitch.tv/tags twitch.tv/commands twitch.tv/membership");
+		send("PASS " ~ _oauth);
+		send("NICK " ~ _nick);
 
-		if (_channels.empty) return;
-		string channels = _channels.keys.join(",#");
-		send("JOIN #%s".format(channels));
+		import std.algorithm.iteration : each;
+		createJoinMessages(_channels).each!(m => send(m));
 	}
 
 	void send(const string s)
 	{
-		if (!_connected) return;
-		_logger.infof("-> %s", s);
-		//_socket.send(s ~ IRC_DELIMITER);
-		concurrencySend(writeTid, s ~ IRC_DELIMITER);
+		if (!_conn.connected) return;
+		logInfo("-> %s", s);
+		_conn.write(s ~ IRC_DELIMITER);
+	}
+
+	void sendf(A...)(lazy string msg, lazy A args)
+	{
+		send(format(msg, args));
+	}
+
+	/// Constructs the JOIN messages for a list of channels, without delimiter.
+	static string[] createJoinMessages(string[] channels)
+	{
+		enum JOIN_PREFIX = "JOIN ";
+		enum JOIN_MAX_LEN = IRC_MAX_LEN - "JOIN ".length - IRC_DELIMITER.length;
+
+		import std.algorithm : min;
+		import std.algorithm.iteration : sum, map;
+		import std.math : ceil;
+		string[] res = [""];
+		int len = 0;
+		int i = 0;
+		foreach (string c; channels)
+		{
+			if (res[i].length + c.length > JOIN_MAX_LEN)
+			{
+				i++;
+				res ~= "";
+			}
+			res[i] ~= ",#" ~ c;
+		}
+		res = res.map!(s => JOIN_PREFIX ~ s[",".length..$]).array;
+		return res;
+	}
+
+	unittest
+	{
+		import std.range : repeat, join;
+		assert(createJoinMessages(["a"]) == ["JOIN #a"]);
+		assert(createJoinMessages(["a", "b", "c"]) == ["JOIN #a,#b,#c"]);
+
+		string[] big = "reallylongtwitchname".repeat(30).array;
+		assert(createJoinMessages(big) == [ 
+			"JOIN " ~ "#reallylongtwitchname".repeat(23).join(","),
+			"JOIN " ~ "#reallylongtwitchname".repeat(7).join(",")
+		]);
 	}
 
 	static RawMessage parseMessage(const string s)
+	in (!s.empty)
 	{
-		if (s.empty) return null;
+		//if (s.empty) return null;
 		string[] parts = s.split(' ');	
 
 		// optional @tags
@@ -739,15 +695,8 @@ private:
 		switch (raw.command) 
 		{
 			case "353": // aka NAMES
-				// note: your own username gets added twice by the server,
-				//       once when you first join the channel, then again
-				//       at the end of a 353. 
 				if (onNames != null)
 					onNames(new Names(raw));
-				//auto names = ;
-				//foreach (user; users)
-				//	_channels[channel].addUser(user);
-
 				break;
 			case "GLOBALUSERSTATE":
 				if (onGlobalUserState != null)
@@ -758,12 +707,8 @@ private:
 					onHostTarget(new HostTarget(raw));
 				break;
 			case "JOIN":
-				//auto join = new Join(raw);
-				//_channels[join.channel].addUser(join.nick);
 				if (onJoin != null)
 					onJoin(new Join(raw));
-				//alias s = std.concurrency.send;
-				//s(new Names(raw));
 				break;
 			case "NAMES":
 				if (onNames != null)
@@ -774,8 +719,6 @@ private:
 					onNotice(new Notice(raw));
 				break;
 			case "PART":
-				//auto part = new Part(raw);
-				//_channels[part.channel].removeUser(part.nick);
 				if (onPart != null)
 					onPart(new Part(raw));
 				break;
