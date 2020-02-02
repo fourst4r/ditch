@@ -332,6 +332,8 @@ class TMIClient
 	void delegate(Ping) onPing;
 	void delegate(Notice) onNotice;
 
+	bool autoReconnect = true;
+
 	@property const(string[]) channels()
 	{
 		return cast(const)_channels;
@@ -382,6 +384,8 @@ class TMIClient
 			{
 				logError("Failed to read from server: %s", e.msg);
 			}
+
+			if (!autoReconnect) break;
 
 			import core.thread : Thread;
 			Thread.sleep(dur!"seconds"(reconnectTime));
