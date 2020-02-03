@@ -318,6 +318,8 @@ class TMIClient
 	import vibe.core.net : TCPConnection, connectTCP;
 	import vibe.core.log;
 
+	void delegate() onConnected;
+	void delegate() onDisconnected;
 	void delegate(PrivMsg) onPrivMsg;
 	void delegate(Whisper) onWhisper;
 	void delegate(HostTarget) onHostTarget;
@@ -375,21 +377,24 @@ class TMIClient
 				while (_conn.connected)
 				{
 					auto ln = cast(string) _conn.readLine();
-					logInfo("<- %s", ln);
+					logDiagnostic("<- %s", ln);
 					RawMessage msg = parseMessage(ln);
 					handleMessage(msg);
 				}			
 			}
 			catch (Exception e)
 			{
-				logError("Failed to read from server: %s", e.msg);
+				logInfo("Disconnected: %s", e.msg);
 			}
 
+			if (onDisconnected != null) onDisconnected();
 			if (!autoReconnect) break;
 
+			logInfo("Reconnecting in %d seconds...", reconnectTime);
 			import core.thread : Thread;
 			Thread.sleep(dur!"seconds"(reconnectTime));
 			reconnectTime = (reconnectTime == 0) ? 1 : reconnectTime << 1;
+			if (reconnectTime > 256) reconnectTime = 256;
 		}
 	}
 
@@ -474,7 +479,7 @@ private:
 	void send(const string s)
 	{
 		if (!_conn.connected) return;
-		logInfo("-> %s", s);
+		logDiagnostic("-> %s", s);
 		_conn.write(s ~ IRC_DELIMITER);
 	}
 
@@ -698,48 +703,52 @@ private:
 	{
 		switch (raw.command) 
 		{
-			case "353": // aka NAMES
-				if (onNames != null)
-					onNames(new Names(raw));
+			case "001":
+				logInfo("Connected to %d channels.", _channels.length);
+				if (onConnected != null) onConnected();
+				break;
+			case "353": // NAMES
+				if (onNames != null) onNames(new Names(raw));
 				break;
 			case "GLOBALUSERSTATE":
-				if (onGlobalUserState != null)
-					onGlobalUserState(new GlobalUserState(raw));
+				if (onGlobalUserState != null) onGlobalUserState(new GlobalUserState(raw));
 				break;
 			case "HOSTTARGET":
-				if (onHostTarget != null)
-					onHostTarget(new HostTarget(raw));
+				if (onHostTarget != null) onHostTarget(new HostTarget(raw));
 				break;
 			case "JOIN":
-				if (onJoin != null)
-					onJoin(new Join(raw));
+				if (onJoin != null) onJoin(new Join(raw));
 				break;
 			case "NAMES":
-				if (onNames != null)
-					onNames(new Names(raw));
+				if (onNames != null) onNames(new Names(raw));
 				break;
 			case "NOTICE":
-				if (onNotice)
-					onNotice(new Notice(raw));
+				if (onNotice != null) onNotice(new Notice(raw));
 				break;
 			case "PART":
-				if (onPart != null)
-					onPart(new Part(raw));
+				if (onPart != null) onPart(new Part(raw));
+				break;
+			case "MODE":
+				if (onMode != null) onMode(new Mode(raw));
 				break;
 			case "PING":
 				send("PONG :tmi.twitch.tv");
-				if (onPing != null)
-					onPing(new Ping(raw));
+				if (onPing != null) onPing(new Ping(raw));
 				break;
 			case "PRIVMSG":
-				if (onPrivMsg != null)
-					onPrivMsg(new PrivMsg(raw));
+				if (onPrivMsg != null) onPrivMsg(new PrivMsg(raw));
+				break;
+			case "ROOMSTATE":
+				if (onRoomState != null) onRoomState(new RoomState(raw));
 				break;
 			case "USERSTATE":
+				if (onUserState != null) onUserState(new UserState(raw));
+				break;
+			case "USERNOTICE":
+				if (onUserNotice != null) onUserNotice(new UserNotice(raw));
 				break;
 			case "WHISPER":
-				if (onWhisper != null)
-					onWhisper(new Whisper(raw));
+				if (onWhisper != null) onWhisper(new Whisper(raw));
 				break;
 			default: 
 				break;
