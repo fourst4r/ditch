@@ -1,6 +1,6 @@
 module ditch.http;
 
-import std.net.curl;
+import vibe.data.json;
 
 class Streams
 {
@@ -27,59 +27,82 @@ class Streams
 	Pagination pagination;
 }
 
+class TwitchAPIError
+{
+	string error;
+	int status;
+	string message;
+}
+
 class Users
 {
-	class Data
+	struct Data
 	{
 		string id;
 		string login;
-		string displayName;
+		@name("display_name") string displayName;
 		string type;
-		string broadcasterType;
+		@name("broadcaster_type") string broadcasterType;
 		string description;
-		string profileImageURL;
-		string offlineImageURL;
-		int viewCount;
-		string email;
+		@name("profile_image_url") string profileImageURL;
+		@name("offline_image_url") string offlineImageURL;
+		@name("view_count") int viewCount;
+		@optional string email;
 	}
 
 	Data[] data;
 }
-
-template GenAPI(T, string[string] params)
-{
-	const string GenAPI = 
-`%s fetch%s()
-{
-	
-}`.format();
-}
-
-//mixin(GenAPI!(Users, ));
+public import std.variant;
 
 class TwitchAPIProcessor
 {
-	import std.json;
+	import vibe.http.client;
+	import vibe.core.log;
+	import vibe.stream.operations : readAll, readAllUTF8;
+	import std.conv;
 
 	enum URL = "https://api.twitch.tv/helix/";
 
 	this(string clientID)
 	{
-		client = HTTP();
-		client.addRequestHeader("Client-ID", clientID);
+		_clientID = clientID;
 	}
 
-	JSONValue fetch(string query)
+	void fetchUsers(void delegate(Users) callback, Algebraic!(int, string)[] args...)
+	in (args.length)
 	{
-		string response = cast(string) get(URL ~ query, client);
-		return parseJSON(response);
+		string url = URL~"users?";
+		foreach (Algebraic!(int, string) arg; args)
+		{
+			import std.format : format;
+			if (arg.peek!int)
+				url ~= format("&id=%d", arg.get!int);
+			else
+				url ~= format("&login=%s", arg.get!string);
+		}
+		fetch(url, HTTPMethod.GET, callback);
 	}
 
-	T fetch(T)(string query)
+	void fetch(T)(string query, HTTPMethod method, void delegate(T) callback)
 	{
-		string response = cast(string) get(URL ~ query, client);
+		requestHTTP(
+			query,
+			(scope HTTPClientRequest req) {
+				req.headers["Client-ID"] = _clientID;
+				req.method = method;
+			},
+			(scope HTTPClientResponse res) {
+				if (res.statusCode != HTTPStatus.OK)
+					throw new HTTPStatusException(res.statusCode);
+				
+				T val;
+				deserializeJson!T(val, res.readJson());
+				if (callback != null)
+				    callback(val);
+			}
+		);
 	}
 
 private:
-	HTTP client;
+	string _clientID;
 }
