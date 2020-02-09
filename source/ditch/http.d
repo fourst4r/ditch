@@ -52,7 +52,6 @@ class Users
 
 	Data[] data;
 }
-public import std.variant;
 
 class TwitchAPIProcessor
 {
@@ -60,6 +59,7 @@ class TwitchAPIProcessor
 	import vibe.core.log;
 	import vibe.stream.operations : readAll, readAllUTF8;
 	import std.conv;
+	import std.variant;
 
 	enum URL = "https://api.twitch.tv/helix/";
 
